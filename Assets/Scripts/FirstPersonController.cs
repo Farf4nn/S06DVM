@@ -1,143 +1,255 @@
+using System.Collections;
 using Unity.Cinemachine;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 public class FirstPersonController : MonoBehaviour
 {
+    [Header("Components")]
     public InputSystem_Actions inputs;
     private CharacterController controller;
+
     public CinemachineCamera characterCamera;
-    public Animator animator;
 
+    private CinemachineImpulseSource impulseSource;
 
-
+    [Header("Movement")]
     public float moveSpeed = 5f;
     public float rotationSpeed = 200f;
-    public float verticalVelocity = 0;
-    public float jumpForce = 10;
 
-    public float pushForce = 4;
+    [Header("Jump")]
+    public float jumpForce = 10f;
+    private float verticalVelocity;
 
-    private bool IsDashing;
-    public float dashForce;
+    [Header("Dash")]
+    public float dashForce = 15f;
     public float dashDuration = 0.2f;
+    public float dashCooldown = 1f;
+
+    private bool isDashing;
+    private bool canDash = true;
     private float dashTimer;
 
+    [Header("Wall Jump")]
+    public float wallCheckDistance = 1f;
+    public float wallJumpHorizontalForce = 8f;
+    public float wallJumpVerticalForce = 10f;
+    public float wallJumpCooldown = 1f;
+
+    private bool isTouchingWall;
+    private bool canWallJump = true;
+
+    [Header("External Forces")]
+    public float externalForceDecay = 5f;
+    private Vector3 externalForce;
+
+    [Header("Push Objects")]
+    public float pushForce = 4f;
+
+    [Header("Input")]
     [SerializeField] private Vector2 moveInput;
+
+    private RaycastHit wallHit;
 
 
     private void Awake()
     {
         inputs = new();
+
         controller = GetComponent<CharacterController>();
+
+        impulseSource = GetComponent<CinemachineImpulseSource>();
 
         Cursor.visible = false;
         Cursor.lockState = CursorLockMode.Locked;
     }
+
     private void OnEnable()
     {
         inputs.Enable();
 
-        inputs.Player.Move.performed += ctx => moveInput = ctx.ReadValue<Vector2>();
-        inputs.Player.Move.canceled += ctx => moveInput = Vector2.zero;
+        inputs.Player.Move.performed += ctx =>
+        {
+            moveInput = ctx.ReadValue<Vector2>();
+        };
 
+        inputs.Player.Move.canceled += ctx =>
+        {
+            moveInput = Vector2.zero;
+        };
 
         inputs.Player.Jump.performed += OnJump;
 
         inputs.Player.Sprint.performed += OnDash;
-
-
-
     }
-    void Start()
-    {
 
-    }
-    void Update()
+    private void OnDisable()
     {
+        inputs.Disable();
+
+        inputs.Player.Jump.performed -= OnJump;
+
+        inputs.Player.Sprint.performed -= OnDash;
+    }
+
+    private void Update()
+    {
+        CheckWall();
 
         OnMove();
-        //OnSimpleMove();
     }
 
-    public void OnMove()
+    private void OnMove()
     {
         Vector3 cameraForwardDir = characterCamera.transform.forward;
+
         cameraForwardDir.y = 0;
+
         cameraForwardDir.Normalize();
 
+        Quaternion targetQuaternion = Quaternion.LookRotation(cameraForwardDir);
 
-      
-       Quaternion targetQuaternion = Quaternion.LookRotation(cameraForwardDir);
-       transform.rotation = targetQuaternion;
-       /*transform.rotation = Quaternion.Slerp(
-           transform.rotation,
-           targetQuaternion,
-           rotationSpeed * Time.deltaTime);*/
+        transform.rotation = targetQuaternion;
 
+        Vector3 moveDir = (cameraForwardDir * moveInput.y +transform.right * moveInput.x) * moveSpeed;
 
-       
-
-        Vector3 moveDir = (cameraForwardDir * moveInput.y + transform.right * moveInput.x) * moveSpeed;
-
-        float magnitud = Mathf.Abs(controller.velocity.magnitude);
-       // print(magnitud);
-        animator.SetFloat("Speed", magnitud);
-
-
-
-
+        float magnitude = Mathf.Abs(controller.velocity.magnitude);
 
         verticalVelocity += Physics.gravity.y * Time.deltaTime;
 
-        if (controller.isGrounded && verticalVelocity < 0)
-            verticalVelocity = -2f;
-
-        moveDir.y = verticalVelocity;
-        animator.SetBool("Grounded", controller.isGrounded);
-
-        if (IsDashing)
+        if (controller.isGrounded &&
+            verticalVelocity < 0)
         {
-            //->convertir el dash a un barrido por el piso! dash con gravedad integrada omaegoto!
-            moveDir = transform.forward * dashForce * (dashTimer / dashDuration);
+            verticalVelocity = -2f;
+        }
+
+        if (isDashing)
+        {
+            moveDir =
+                transform.forward *
+                dashForce *
+                (dashTimer / dashDuration);
 
             dashTimer -= Time.deltaTime;
 
             if (dashTimer <= 0)
-                IsDashing = false;
+            {
+                isDashing = false;
+            }
         }
+
+        moveDir += externalForce;
+
+        externalForce = Vector3.Lerp(externalForce,Vector3.zero,externalForceDecay * Time.deltaTime);
+
+        moveDir.y = verticalVelocity;
         controller.Move(moveDir * Time.deltaTime);
     }
 
     private void OnJump(InputAction.CallbackContext context)
     {
-        if (!controller.isGrounded) return;
+        if (controller.isGrounded)
+        {
+            verticalVelocity = jumpForce;
 
-        animator.SetTrigger("Jump");
+            if (impulseSource != null)
+            {
+                impulseSource.GenerateImpulse(0.2f);
+            }
 
-        verticalVelocity = jumpForce;
+            return;
+        }
+
+        if (isTouchingWall && canWallJump)
+        {
+            Vector3 wallJumpDir = wallHit.normal;
+
+            externalForce = wallJumpDir * wallJumpHorizontalForce;
+
+            verticalVelocity = wallJumpVerticalForce;
+
+            if (impulseSource != null)
+            {
+                impulseSource.GenerateImpulse(0.5f);
+            }
+
+            StartCoroutine(WallJumpCooldown());
+        }
     }
-    public void OnSimpleMove()
+
+    private void OnDash(InputAction.CallbackContext context)
     {
-        transform.Rotate(Vector3.up * moveInput.x * rotationSpeed * Time.deltaTime);
-        Vector3 moveDir = transform.forward * moveSpeed * moveInput.y;
-        controller.SimpleMove(moveDir);
+        if (!canDash)
+            return;
+
+        StartCoroutine(DashCooldown());
     }
+
+    IEnumerator DashCooldown()
+    {
+        canDash = false;
+
+        isDashing = true;
+
+        dashTimer = dashDuration;
+
+        yield return new WaitForSeconds(dashDuration);
+
+        isDashing = false;
+
+        yield return new WaitForSeconds(dashCooldown);
+
+        canDash = true;
+    }
+
+    IEnumerator WallJumpCooldown()
+    {
+        canWallJump = false;
+
+        yield return new WaitForSeconds(wallJumpCooldown);
+
+        canWallJump = true;
+    }
+
+    private void CheckWall()
+    {
+        isTouchingWall = Physics.Raycast(transform.position,transform.right,out wallHit,wallCheckDistance);
+
+        if (!isTouchingWall)
+        {
+            isTouchingWall = Physics.Raycast(transform.position,-transform.right,out wallHit,wallCheckDistance);
+        }
+
+        if (isTouchingWall)
+        {
+            if (!wallHit.collider.CompareTag("Wall"))
+            {
+                isTouchingWall = false;
+            }
+        }
+
+        Debug.DrawRay(transform.position,transform.right * wallCheckDistance,Color.red);
+
+        Debug.DrawRay(transform.position,-transform.right * wallCheckDistance,Color.blue);
+    }
+
     private void OnControllerColliderHit(ControllerColliderHit hit)
     {
-
-
-        Vector3 pushDir = (hit.transform.position - transform.position).normalized;
+        Vector3 pushDir =(hit.transform.position - transform.position).normalized;
 
         if (hit.rigidbody != null && hit.rigidbody.linearVelocity == Vector3.zero)
         {
-            print(hit.gameObject.name);
-            hit.rigidbody.AddForce(pushDir * pushForce, ForceMode.Impulse);
+            hit.rigidbody.AddForce(pushDir * pushForce,ForceMode.Impulse);
         }
     }
-    private void OnDash(InputAction.CallbackContext context)
+
+    public void TakeDamage(int damage)
     {
-        IsDashing = true;
-        dashTimer = dashDuration;
+        Debug.Log("Daño recibido: " + damage);
+
+        if (impulseSource != null)
+        {
+            impulseSource.GenerateImpulse(1.5f);
+        }
     }
 }
